@@ -484,6 +484,16 @@
     </div>
   </dialog>
 
+  <dialog id="promptDialog">
+    <h3 id="promptTitle"></h3>
+    <p class="sub" id="promptMsg"></p>
+    <input type="password" id="promptInput" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <div class="btn-row right">
+      <button id="btnPromptCancel">Cancel</button>
+      <button class="primary" id="btnPromptOk">OK</button>
+    </div>
+  </dialog>
+
   <dialog id="healthDialog">
     <h3>🩺 Vault health</h3>
     <p class="sub">Checks run locally — nothing leaves this device.</p>
@@ -1193,6 +1203,25 @@ function ask(msg, opts = {}) {
   });
 }
 
+/* Styled prompt() replacement: resolves to the typed text, or null when
+   cancelled / Esc'd. The input is type=password — it's only ever used for
+   the master password (Face ID enable). Enter submits. */
+function askText(msg, opts = {}) {
+  return new Promise(resolve => {
+    $("promptTitle").textContent = opts.title || "PassGen";
+    $("promptMsg").textContent = msg;
+    const dlg = $("promptDialog"), input = $("promptInput"), ok = $("btnPromptOk");
+    input.value = "";
+    ok.textContent = opts.ok || "OK";
+    dlg.onclose = () => { input.value = ""; resolve(null); };
+    ok.onclick = () => { const v = input.value; input.value = ""; resolve(v); dlg.close(); };
+    $("btnPromptCancel").onclick = () => dlg.close();
+    input.onkeydown = e => { if (e.key === "Enter") ok.onclick(); };
+    dlg.showModal();
+    input.focus();
+  });
+}
+
 /* ==================== character-class colors (batch E) ==================== */
 
 /* Monocraft makes l/1/I and O/0 ambiguous — color digits (cyan), uppercase
@@ -1803,8 +1832,9 @@ window.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     // turning on: we need the current master password — re-wrap by asking the user to confirm it
-    const pw = prompt("Enter the master password to enable Face ID unlock on this iPad:");
-    if (pw == null) return;
+    const pw = await askText("Enter the master password to enable Face ID unlock on this iPad:",
+                             { title: "🙂 Face ID", ok: "Enable" });
+    if (!pw) return;
     try {
       // verify the password actually opens this vault before storing it
       await decryptVault(await encryptVault(), pw);
