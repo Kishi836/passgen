@@ -5,6 +5,8 @@
 <!-- viewport-fit=cover so the aurora bg reaches under the iPad's rounded corners / home bar -->
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
+<!-- Everything is inline/data: — connect-src 'none' means injected script can never phone home -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; font-src data:; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="PassGen">
@@ -320,6 +322,9 @@
           <button class="primary" id="btnOpenVault">📂 Open existing vault.json</button>
           <button id="btnNewVault">✨ Create new vault</button>
         </div>
+        <div class="btn-row">
+          <button class="small" id="btnBackups">⏪ Local backups</button>
+        </div>
         <input type="file" id="vaultFileInput" accept=".json,application/json" class="hidden">
       </div>
 
@@ -427,6 +432,17 @@
   </dialog>
 
   <!-- Face ID enrollment offer -->
+  <dialog id="backupDialog">
+    <h3>⏪ Local backups</h3>
+    <p class="sub">Encrypted snapshots kept in this browser (last 5) — taken whenever a
+    vault is opened or overwritten here. Pick one, unlock it with the master password,
+    then 💾 Save to write it back to vault.json.</p>
+    <div id="backupList"></div>
+    <div class="btn-row right">
+      <button id="btnBackupCancel">Close</button>
+    </div>
+  </dialog>
+
   <dialog id="faceDialog">
     <h3>👤 Unlock with Face ID?</h3>
     <p class="sub">Next time, just look at your iPad to open the vault — no typing.
@@ -447,10 +463,17 @@
 /* ==================== constants & state ==================== */
 
 const KDF_ITERATIONS = 600000;          // PBKDF2-SHA256, OWASP-recommended order of magnitude
+const KDF_MIN_ITERS  = 100000;          // vault files outside this range are rejected
+const KDF_MAX_ITERS  = 5000000;         //  (tamper / freeze-the-tab guard)
 const AUTO_LOCK_MS   = 5 * 60 * 1000;   // lock after 5 min of inactivity
+const LOCK_GRACE_MS  = 60 * 1000;       // extra minute before force-locking with unsaved changes
+const CLIP_CLEAR_MS  = 30 * 1000;       // clipboard auto-clear delay after a copy
+const REVEAL_HIDE_MS = 20 * 1000;       // revealed password auto-mask delay
 const VAULT_VERSION  = 1;
 const HISTORY_KEEP   = 3;               // old passwords kept per entry
 const AUTOSAVE_DELAY = 1200;            // debounce before an auto-save fires
+const MASK = "••••••••••••";
+const PENDING_KEY = "passgen.pendingVault"; // sessionStorage: encrypted stash from a dirty auto-lock
 
 let vault       = null;   // decrypted: { entries: [{id,name,label,user,pass,updated,history[]}] }
 let cryptoKey   = null;   // derived AES key (non-extractable)
@@ -465,6 +488,9 @@ let lockTimer   = null;
 let lastMasterPw = null;  // transient: held only between unlock and a possible Face ID enroll
 let autoSave    = localStorage.getItem("passgen.autosave") !== "0"; // default ON
 let autoSaveTimer = null;
+let lastSyncedText = null; // vault.json ciphertext as last read from / written to disk
+let restoringBackup = false; // next unlock comes from a local backup snapshot
+let conflictHinted = false;  // auto-save conflict toast shown (don't spam)
 
 const $ = id => document.getElementById(id);
 const enc = new TextEncoder();
@@ -499,14 +525,47 @@ async function encryptVault() {
 async function decryptVault(fileText, password) {
   const blob = JSON.parse(fileText);
   if (blob.app !== "PassGenVault") throw new Error("Not a PassGen vault file.");
+  const iters = blob.kdf && blob.kdf.iterations;
+  if (!Number.isInteger(iters) || iters < KDF_MIN_ITERS || iters > KDF_MAX_ITERS)
+    throw new Error("Vault KDF iteration count is outside the accepted range — file may be tampered.");
   const salt = unb64(blob.kdf.salt);
-  const key  = await deriveKey(password, salt, blob.kdf.iterations);
+  const key  = await deriveKey(password, salt, iters);
   const pt   = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: unb64(blob.iv) }, key, unb64(blob.data));
   kdfSalt = salt;
   kdfIters = blob.kdf.iterations;
   cryptoKey = key;
   return JSON.parse(dec.decode(pt));
+}
+
+/* Decrypt a vault file that must be sealed with the CURRENT key (same salt and
+   iteration count). Lets us read a concurrently-changed vault.json for merging
+   without asking for the master password again. */
+async function decryptWithCurrentKey(fileText) {
+  const blob = JSON.parse(fileText);
+  if (blob.app !== "PassGenVault") throw new Error("Not a PassGen vault file.");
+  if (!cryptoKey || !kdfSalt ||
+      blob.kdf.salt !== b64(kdfSalt) || blob.kdf.iterations !== kdfIters)
+    throw new Error("Vault file is sealed with a different key.");
+  const pt = await crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: unb64(blob.iv) }, cryptoKey, unb64(blob.data));
+  return JSON.parse(dec.decode(pt));
+}
+
+/* Merge two decrypted vaults: union by entry id, newer `updated` wins.
+   Known limitation: the format has no deletion tombstones, so an entry deleted
+   on one device while still present on the other comes back after a merge. */
+function mergeVaults(mine, theirs) {
+  const byId = new Map(mine.entries.map(e => [e.id, e]));
+  let took = 0;
+  for (const t of theirs.entries) {
+    const m = byId.get(t.id);
+    if (!m || (t.updated || "") > (m.updated || "")) {
+      byId.set(t.id, t);
+      took++;
+    }
+  }
+  return { merged: { ...mine, entries: [...byId.values()] }, took };
 }
 
 /* ==================== Face ID unlock (WebAuthn + PRF) ==================== *
@@ -668,13 +727,53 @@ function generatePassword(length, symbols) {
 
 const hasFSAccess = "showOpenFilePicker" in window;
 
+/* Rolling local backups: the last few vault ciphertexts, kept in IndexedDB in
+   this browser. A snapshot is taken whenever a vault is opened and of the old
+   disk content before every overwrite, so a bad save or sync can be rolled
+   back from the lock screen (⏪ Local backups). Fail-soft by design: any
+   IndexedDB problem is swallowed — backups must never block a save. */
+const BACKUP_KEEP = 5;
+const backups = {
+  _db: null,
+  async _open() {
+    return this._db ??= await new Promise((res, rej) => {
+      const r = indexedDB.open("passgen-backups", 1);
+      r.onupgradeneeded = () => r.result.createObjectStore("snaps", { keyPath: "ts" });
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async _tx(mode, fn) {
+    try {
+      const db = await this._open();
+      return await new Promise((res, rej) => {
+        const req = fn(db.transaction("snaps", mode).objectStore("snaps"));
+        req.onsuccess = () => res(req.result);
+        req.onerror = () => rej(req.error);
+      });
+    } catch { return null; }
+  },
+  async list() { return (await this._tx("readonly", s => s.getAll())) || []; }, // ts-ascending
+  async snapshot(text) {
+    try { if (JSON.parse(text).app !== "PassGenVault") return; } catch { return; }
+    const snaps = await this.list();
+    if (snaps.length && snaps[snaps.length - 1].text === text) return; // unchanged since last snap
+    await this._tx("readwrite", s => s.put({ ts: Date.now(), text }));
+    for (const old of snaps.slice(0, Math.max(0, snaps.length + 1 - BACKUP_KEEP)))
+      await this._tx("readwrite", s => s.delete(old.ts));
+  },
+};
+
 async function pickVaultFile() {
   if (hasFSAccess) {
     const [h] = await window.showOpenFilePicker({
       types: [{ description: "PassGen Vault", accept: { "application/json": [".json"] } }]
     });
     fileHandle = h;
-    return await (await h.getFile()).text();
+    const text = await (await h.getFile()).text();
+    lastSyncedText = text;
+    backups.snapshot(text);
+    return text;
   }
   // iPad / Safari: classic file input — the Files app shows OneDrive as a provider
   return new Promise((resolve, reject) => {
@@ -682,14 +781,59 @@ async function pickVaultFile() {
     input.onchange = () => {
       const f = input.files[0];
       if (!f) return reject(new Error("No file chosen"));
-      f.text().then(resolve, reject);
+      f.text().then(text => {
+        lastSyncedText = text;
+        backups.snapshot(text);
+        resolve(text);
+      }, reject);
       input.value = "";
     };
     input.click();
   });
 }
 
-async function saveVaultFile() {
+/* Before overwriting vault.json, check whether it changed on disk since we last
+   read or wrote it (edited on another device, synced down by OneDrive). Returns
+   true when the save may proceed — possibly after merging the disk version into
+   `vault`. Non-interactive callers (auto-save) never get dialogs: on conflict
+   they get false plus a one-time hint to press Save. Only runs where a file
+   handle exists (desktop browsers — iPad Safari saves via download). */
+async function guardConflict(interactive) {
+  let diskText;
+  try { diskText = await (await fileHandle.getFile()).text(); }
+  catch { return true; } // can't read the disk — proceed as before this feature
+  await backups.snapshot(diskText); // whatever happens next, the old content survives
+  if (lastSyncedText === null || diskText === lastSyncedText) return true;
+  if (!interactive) {
+    if (!conflictHinted) {
+      conflictHinted = true;
+      toast("⚠ vault.json changed on another device — press 💾 Save to review & merge");
+    }
+    return false;
+  }
+  let theirs = null;
+  try { theirs = await decryptWithCurrentKey(diskText); } catch {}
+  if (!theirs) {
+    return confirm(
+      "⚠ vault.json was re-encrypted elsewhere (master password changed on another device?).\n\n" +
+      "OK = OVERWRITE it with this device's copy\n" +
+      "Cancel = don't save (re-open the file to see the other version — the current disk copy was just backed up)");
+  }
+  const { merged, took } = mergeVaults(vault, theirs);
+  if (!confirm(
+      "⚠ vault.json changed on another device since you opened it.\n\n" +
+      `OK = merge and save (keeps ${took} change(s) from the other device plus everything from this one)\n` +
+      "Cancel = don't save")) return false;
+  vault = merged;
+  lastSyncedText = diskText;
+  renderEntries();
+  return true;
+}
+
+/* Returns true when the vault was actually written (false = user cancelled a
+   conflict prompt, or auto-save deferred to a manual Save). */
+async function saveVaultFile(interactive = true) {
+  if (fileHandle && !(await guardConflict(interactive))) return false;
   const text = await encryptVault();
   cacheVault(text); // keep the local Face ID cache in step with every save
   if (fileHandle) {
@@ -701,6 +845,7 @@ async function saveVaultFile() {
       suggestedName: "vault.json",
       types: [{ description: "PassGen Vault", accept: { "application/json": [".json"] } }]
     });
+    try { await backups.snapshot(await (await fileHandle.getFile()).text()); } catch {}
     const w = await fileHandle.createWritable();
     await w.write(text);
     await w.close();
@@ -713,7 +858,11 @@ async function saveVaultFile() {
     URL.revokeObjectURL(a.href);
     toast("Downloaded vault.json — Save to Files → your OneDrive folder, replacing the old one");
   }
+  lastSyncedText = text;
+  conflictHinted = false;
+  sessionStorage.removeItem(PENDING_KEY); // stashed changes are now saved
   setDirty(false);
+  return true;
 }
 
 /* ==================== UI helpers ==================== */
@@ -727,10 +876,20 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
 }
 
+let clipClearTimer = null;
 async function copyText(text, label) {
   try {
     await navigator.clipboard.writeText(text);
-    toast(`${label} copied — paste it, then copy something harmless to clear the clipboard`);
+    toast(`${label} copied — clipboard auto-clears in 30 s`);
+    clearTimeout(clipClearTimer);
+    clipClearTimer = setTimeout(async () => {
+      // best-effort: only clear if the clipboard still holds this password
+      // (readText/writeText can fail when the window is unfocused — then we leave it alone)
+      try {
+        if (await navigator.clipboard.readText() === text)
+          await navigator.clipboard.writeText("");
+      } catch {}
+    }, CLIP_CLEAR_MS);
   } catch {
     toast("Clipboard blocked — select the text and copy manually");
   }
@@ -768,7 +927,7 @@ function scheduleAutoSave() {
 async function doAutoSave() {
   if (!autoSave || !dirty || !vault) return;
   if (fileHandle) {
-    try { await saveVaultFile(); }
+    try { await saveVaultFile(false); } // never pops dialogs; defers conflicts to manual Save
     catch (err) { toast("Auto-save failed: " + err.message); }
   } else if (!hasFSAccess) {
     try { cacheVault(await encryptVault()); } catch {}
@@ -828,7 +987,7 @@ function renderEntries() {
         </div>
       </div>
       <div class="entry-pass">
-        <div class="pass-text mono" data-role="pw">••••••••••••</div>
+        <div class="pass-text mono" data-role="pw">${MASK}</div>
         <div class="entry-actions">
           <button class="small" data-act="show" title="Show / hide">👁</button>
           <button class="small" data-act="copy" title="Copy password">📋</button>
@@ -885,7 +1044,9 @@ function entryAction(id, act, rowEl) {
     case "show": {
       const pwEl = rowEl.querySelector('[data-role="pw"]');
       const hiddenNow = pwEl.textContent.startsWith("•");
-      pwEl.textContent = hiddenNow ? e.pass : "••••••••••••";
+      pwEl.textContent = hiddenNow ? e.pass : MASK;
+      clearTimeout(pwEl._hideTimer);
+      if (hiddenNow) pwEl._hideTimer = setTimeout(() => { pwEl.textContent = MASK; }, REVEAL_HIDE_MS);
       break;
     }
     case "copy":
@@ -944,6 +1105,7 @@ function showApp() {
 function lock() {
   if (dirty && !confirm("You have UNSAVED changes that will be lost. Lock anyway?")) return;
   vault = null; cryptoKey = null; kdfSalt = null; pendingFileText = null; lastMasterPw = null;
+  restoringBackup = false;
   setDirty(false);
   openGroups.clear();
   $("entryList").innerHTML = "";
@@ -966,9 +1128,39 @@ function refreshLockScreen() {
 function resetLockTimer() {
   clearTimeout(lockTimer);
   lockTimer = setTimeout(() => {
-    if (vault && !dirty) { lock(); toast("Auto-locked after inactivity"); }
-    else if (vault) { toast("⚠ Not auto-locking: you have unsaved changes — save them!"); resetLockTimer(); }
+    if (!vault) return;
+    if (!dirty) { lock(); toast("Auto-locked after inactivity"); return; }
+    // unsaved changes: one grace minute, then lock anyway with the changes stashed encrypted
+    toast("⚠ Unsaved changes — auto-locking in 1 min (they'll be kept, encrypted)");
+    lockTimer = setTimeout(() => { if (vault) lockWithStash(); }, LOCK_GRACE_MS);
   }, AUTO_LOCK_MS);
+}
+
+/* Force-lock with unsaved changes: encrypt them (same format as the vault file)
+   into sessionStorage, lock, and lead with the unlock form so the session can be
+   resumed with just the master password. The stash survives a tab reload and is
+   deleted after the next successful Save. */
+async function lockWithStash() {
+  if (!dirty) { lock(); toast("Auto-locked after inactivity"); return; }
+  let stash;
+  try {
+    stash = await encryptVault();
+    sessionStorage.setItem(PENDING_KEY, stash);
+  } catch { resetLockTimer(); return; }  // couldn't stash — stay unlocked, retry later
+  dirty = false;                         // changes live on in the stash; skip lock()'s confirm
+  lock();
+  resumePending(stash);
+  toast("Auto-locked — unsaved changes kept encrypted; unlock to continue");
+}
+
+/* Lead the lock screen with the unlock form, primed with a stashed session.
+   Takes priority over the Face ID box — Face ID would decrypt the older cache. */
+function resumePending(stash) {
+  pendingFileText = stash;
+  $("lockChoice").classList.add("hidden");
+  $("faceUnlockBox").classList.add("hidden");
+  $("unlockForm").classList.remove("hidden");
+  $("masterPw").focus();
 }
 
 ["click", "keydown", "touchstart"].forEach(ev =>
@@ -989,7 +1181,7 @@ async function selfTest() {
       assert(`gen #${i} only allowed chars`, /^[a-zA-Z0-9!@#$%^&*\-_=+?]+$/.test(pw));
     }
     kdfSalt = crypto.getRandomValues(new Uint8Array(16));
-    kdfIters = 1000;
+    kdfIters = KDF_MIN_ITERS; // lowest accepted count keeps the test fast
     cryptoKey = await deriveKey("test-master-password", kdfSalt, kdfIters);
     vault = { entries: [{ id: "1", name: "Gmail", user: "a@b.c", pass: "p", updated: "", history: [] }] };
     const fileText = await encryptVault();
@@ -999,6 +1191,37 @@ async function selfTest() {
     let wrongPwFailed = false;
     try { await decryptVault(fileText, "wrong-password"); } catch { wrongPwFailed = true; }
     assert("wrong password rejected", wrongPwFailed);
+    // KDF iteration guard: tampered / freeze-the-tab files are rejected before deriving
+    const tampered = JSON.parse(fileText);
+    tampered.kdf.iterations = 1000;
+    let lowRejected = false;
+    try { await decryptVault(JSON.stringify(tampered), "test-master-password"); } catch { lowRejected = true; }
+    assert("low-iteration vault rejected", lowRejected);
+    tampered.kdf.iterations = 1e9;
+    let hugeRejected = false;
+    try { await decryptVault(JSON.stringify(tampered), "test-master-password"); } catch { hugeRejected = true; }
+    assert("huge-iteration vault rejected", hugeRejected);
+    // conflict merge helpers (batch B): current-key decrypt + union merge
+    const sameKey = await decryptWithCurrentKey(fileText);
+    assert("current-key decrypt round-trip", JSON.stringify(sameKey) === JSON.stringify(vault));
+    const foreign = JSON.parse(fileText);
+    foreign.kdf.salt = b64(crypto.getRandomValues(new Uint8Array(16)));
+    let foreignRejected = false;
+    try { await decryptWithCurrentKey(JSON.stringify(foreign)); } catch { foreignRejected = true; }
+    assert("foreign-key vault rejected for merge", foreignRejected);
+    const mineV = { entries: [
+      { id: "x", name: "Gmail", user: "", pass: "old",  updated: "2026-01-01T00:00:00Z", history: [] },
+      { id: "y", name: "Steam", user: "", pass: "mine", updated: "2026-01-02T00:00:00Z", history: [] },
+    ]};
+    const theirsV = { entries: [
+      { id: "x", name: "Gmail", user: "", pass: "new",    updated: "2026-02-01T00:00:00Z", history: [] },
+      { id: "z", name: "Epic",  user: "", pass: "theirs", updated: "2026-01-03T00:00:00Z", history: [] },
+    ]};
+    const { merged, took } = mergeVaults(mineV, theirsV);
+    assert("merge unions by id", merged.entries.length === 3);
+    assert("merge: newer remote edit wins", merged.entries.find(e => e.id === "x").pass === "new");
+    assert("merge: local-only entry kept", merged.entries.find(e => e.id === "y").pass === "mine");
+    assert("merge counts remote changes", took === 2);
     // vault format stays byte-compatible with passgen.html / the APK
     assert("vault file header app tag", JSON.parse(fileText).app === "PassGenVault");
     const grouped = groupEntries([
@@ -1074,8 +1297,15 @@ window.addEventListener("DOMContentLoaded", async () => {
     $("lockChoice").classList.remove("hidden");
   };
 
-  // Auto-prompt Face ID on open, just like the phone app.
-  if (facePlatformAvailable && faceConfigured() && cachedVault()) {
+  /* Resume a stashed session from a dirty auto-lock (survives reloads in this tab).
+     Takes priority over the Face ID auto-prompt — Face ID would decrypt the older
+     cached vault and silently ignore the stashed changes. */
+  const stash = sessionStorage.getItem(PENDING_KEY);
+  if (stash) {
+    resumePending(stash);
+    toast("Unsaved changes were kept encrypted — unlock to restore them");
+  } else if (facePlatformAvailable && faceConfigured() && cachedVault()) {
+    // Auto-prompt Face ID on open, just like the phone app.
     setTimeout(doFaceUnlock, 350);
   }
 
@@ -1102,15 +1332,47 @@ window.addEventListener("DOMContentLoaded", async () => {
   };
   $("btnBackLock").onclick = $("btnBackLock2").onclick = () => lock();
 
+  /* local backups: list snapshots, pick one, unlock it like a normal vault file */
+  $("btnBackups").onclick = async () => {
+    const snaps = await backups.list();
+    $("backupList").innerHTML = snaps.length
+      ? snaps.slice().reverse().map(s =>
+          `<button data-ts="${s.ts}" style="width:100%;margin:6px 0;text-align:left">` +
+          `${new Date(s.ts).toLocaleString()} — ${(s.text.length / 1024).toFixed(1)} KB</button>`).join("")
+      : `<p class="sub">No local backups yet — they appear after a vault is opened or saved in this browser.</p>`;
+    $("backupDialog").showModal();
+  };
+  $("btnBackupCancel").onclick = () => $("backupDialog").close();
+  $("backupList").addEventListener("click", async ev => {
+    const btn = ev.target.closest("button[data-ts]");
+    if (!btn) return;
+    const snap = (await backups.list()).find(s => s.ts === Number(btn.dataset.ts));
+    if (!snap) return;
+    $("backupDialog").close();
+    restoringBackup = true;
+    resumePending(snap.text); // same flow as a stashed session: unlock form, master pw
+  });
+
   $("btnUnlock").onclick = async () => {
     try {
       const pw = $("masterPw").value;
+      const fromStash = pendingFileText !== null &&
+                        pendingFileText === sessionStorage.getItem(PENDING_KEY);
+      const fromBackup = restoringBackup;
       vault = await decryptVault(pendingFileText, pw);
       cacheVault(pendingFileText);   // remember ciphertext for Face ID quick-unlock
       lastMasterPw = pw;             // held only until the Face ID offer is resolved
       pendingFileText = null;
+      restoringBackup = false;
       $("masterPw").value = "";
       afterUnlock();
+      if (fromStash) {
+        setDirty(true);
+        toast("Unsaved changes restored — 💾 Save to write them to vault.json");
+      } else if (fromBackup) {
+        setDirty(true);
+        toast("Backup restored — 💾 Save to write it back to vault.json");
+      }
     } catch {
       toast("Wrong master password (or corrupted vault)");
     }
@@ -1187,7 +1449,7 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   /* ---- main toolbar ---- */
   $("btnSave").onclick = async () => {
-    try { await saveVaultFile(); toast("Vault saved (encrypted)"); }
+    try { if (await saveVaultFile()) toast("Vault saved (encrypted)"); }
     catch (err) {
       if (err && err.name === "AbortError") return;
       toast("Save failed: " + err.message);
