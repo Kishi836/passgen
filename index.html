@@ -211,6 +211,10 @@
     word-break: break-all; user-select: all;
   }
   .entry-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  .entry-totp { display: flex; align-items: center; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+  .totp-code { font-size: 1.05rem; letter-spacing: 3px; color: var(--acc2);
+    filter: drop-shadow(0 0 5px var(--glow-cyan)); }
+  .totp-left { color: var(--muted); font-size: .68rem; min-width: 3ch; }
   .entry-meta { color: var(--muted); font-size: .64rem; margin-top: 10px; }
   details.history { margin-top: 8px; }
   details.history summary { color: var(--muted); font-size: .68rem; cursor: pointer; }
@@ -409,6 +413,8 @@
     <input type="text" id="fUser" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
     <label for="fPass">Password</label>
     <input type="text" id="fPass" class="mono" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="fTotp">2FA / TOTP secret (optional — the QR code's secret or otpauth:// link)</label>
+    <input type="text" id="fTotp" class="mono" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="e.g. JBSW Y3DP EHPK 3PXP">
     <div class="btn-row">
       <button class="small" id="btnFillGen">⚡ Generate 32-char</button>
     </div>
@@ -723,6 +729,83 @@ function generatePassword(length, symbols) {
   }
 }
 
+/* ==================== TOTP (RFC 6238 — SHA-1, 6 digits, 30 s) ==================== *
+ * The standard flavor virtually every website's authenticator QR uses. The     *
+ * secret is stored per entry (optional `totp` field, flat in the vault format; *
+ * clients that don't know it ignore it and — since the APK's passthrough patch *
+ * — preserve it on save).                                                      */
+
+const TOTP_PERIOD = 30;
+const B32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+
+function base32Decode(str) {
+  const clean = str.toUpperCase().replace(/[\s-]/g, "").replace(/=+$/, "");
+  if (!clean || [...clean].some(c => !B32_ALPHABET.includes(c)))
+    throw new Error("Not a valid base32 secret.");
+  let bits = 0, value = 0;
+  const out = [];
+  for (const c of clean) {
+    value = (value << 5) | B32_ALPHABET.indexOf(c);
+    bits += 5;
+    if (bits >= 8) { out.push((value >>> (bits - 8)) & 0xff); bits -= 8; }
+  }
+  return new Uint8Array(out);
+}
+
+/* Accepts a raw base32 secret ("JBSW Y3DP…", spaces/case/padding ignored) or a
+   full otpauth:// URI (the text form of the enrollment QR code). Returns the
+   canonical base32 string, "" for empty input, or throws with a reason. */
+function normalizeTotpSecret(input) {
+  let s = (input || "").trim();
+  if (!s) return "";
+  if (/^otpauth:\/\//i.test(s)) {
+    const u = new URL(s);
+    if ((u.searchParams.get("algorithm") || "SHA1").toUpperCase() !== "SHA1" ||
+        (u.searchParams.get("digits") || "6") !== "6" ||
+        (u.searchParams.get("period") || "30") !== "30")
+      throw new Error("Only standard TOTP (SHA-1, 6 digits, 30 s) is supported.");
+    s = u.searchParams.get("secret") || "";
+  }
+  s = s.toUpperCase().replace(/[\s-]/g, "").replace(/=+$/, "");
+  base32Decode(s); // validates; throws on garbage
+  return s;
+}
+
+async function totpCode(secret, unixSeconds) {
+  const key = await crypto.subtle.importKey(
+    "raw", base32Decode(secret), { name: "HMAC", hash: "SHA-1" }, false, ["sign"]);
+  const counter = new DataView(new ArrayBuffer(8));
+  counter.setBigUint64(0, BigInt(Math.floor(unixSeconds / TOTP_PERIOD)));
+  const mac = new Uint8Array(await crypto.subtle.sign("HMAC", key, counter.buffer));
+  const off = mac[mac.length - 1] & 0x0f;
+  const bin = ((mac[off] & 0x7f) << 24) | (mac[off + 1] << 16) | (mac[off + 2] << 8) | mac[off + 3];
+  return String(bin % 1e6).padStart(6, "0");
+}
+
+/* Live ticker: refreshes every [data-totp] code span once per 30 s slot and the
+   countdown every second. Started on unlock, stopped on lock. */
+let totpTimer = null;
+function startTotpTicker() { clearInterval(totpTimer); totpTimer = setInterval(tickTotp, 1000); tickTotp(); }
+function stopTotpTicker()  { clearInterval(totpTimer); totpTimer = null; }
+
+async function tickTotp() {
+  if (!vault) return;
+  const now = Math.floor(Date.now() / 1000);
+  const slot = Math.floor(now / TOTP_PERIOD);
+  const left = TOTP_PERIOD - (now % TOTP_PERIOD);
+  document.querySelectorAll("[data-totp-left]").forEach(el => { el.textContent = left + "s"; });
+  for (const el of document.querySelectorAll("[data-totp]")) {
+    if (el._slot === slot) continue;
+    const e = findEntry(el.dataset.totp);
+    if (!e || !e.totp) continue;
+    el._slot = slot;
+    try {
+      const c = await totpCode(e.totp, now);
+      el.textContent = c.slice(0, 3) + " " + c.slice(3);
+    } catch { el.textContent = "invalid"; }
+  }
+}
+
 /* ==================== file I/O ==================== */
 
 const hasFSAccess = "showOpenFilePicker" in window;
@@ -994,6 +1077,14 @@ function renderEntries() {
           <button class="small" data-act="regen" title="Generate new password">🔄</button>
         </div>
       </div>
+      ${e.totp ? `
+      <div class="entry-totp">
+        <span class="mono totp-code" data-totp="${e.id}">··· ···</span>
+        <span class="totp-left" data-totp-left></span>
+        <div class="entry-actions">
+          <button class="small" data-act="copytotp" title="Copy 2FA code">📋 2FA</button>
+        </div>
+      </div>` : ""}
       <div class="entry-meta">updated ${new Date(e.updated).toLocaleString()}</div>
       ${e.history.length ? `
         <details class="history">
@@ -1022,6 +1113,7 @@ function renderEntries() {
     : "";
 
   list.innerHTML = msg + groupEntries(matches).map(tile).join("") + addTile;
+  tickTotp(); // fill fresh code spans immediately instead of on the next tick
 }
 
 /* ==================== entry actions ==================== */
@@ -1032,7 +1124,7 @@ function openAddDialog(prefillName) {
   editingId = null;
   $("entryDialogTitle").textContent = prefillName ? `Add login to ${prefillName}` : "Add account";
   $("fName").value = prefillName || "";
-  $("fLabel").value = $("fUser").value = $("fPass").value = "";
+  $("fLabel").value = $("fUser").value = $("fPass").value = $("fTotp").value = "";
   $("entryDialog").showModal();
   (prefillName ? $("fLabel") : $("fName")).focus();
 }
@@ -1052,6 +1144,10 @@ function entryAction(id, act, rowEl) {
     case "copy":
       copyText(e.pass, `${e.name} password`);
       break;
+    case "copytotp":
+      totpCode(e.totp, Math.floor(Date.now() / 1000))
+        .then(c => copyText(c, `${e.name} 2FA code`), () => toast("Invalid TOTP secret on this entry"));
+      break;
     case "regen": {
       if (!confirm(`Generate a NEW password for "${e.name}"?\n\nThe current one is kept under "previous passwords" until you save & confirm the change on the website.`)) return;
       e.history.unshift({ pass: e.pass, replaced: new Date().toISOString() });
@@ -1070,6 +1166,7 @@ function entryAction(id, act, rowEl) {
       $("fLabel").value = e.label || "";
       $("fUser").value = e.user;
       $("fPass").value = e.pass;
+      $("fTotp").value = e.totp || "";
       $("entryDialog").showModal();
       break;
     case "del":
@@ -1098,6 +1195,7 @@ function showApp() {
   $("app").classList.remove("hidden");
   reflectFaceToggle();
   reflectAutoToggle();
+  startTotpTicker();
   renderEntries();
   resetLockTimer();
 }
@@ -1106,6 +1204,7 @@ function lock() {
   if (dirty && !confirm("You have UNSAVED changes that will be lost. Lock anyway?")) return;
   vault = null; cryptoKey = null; kdfSalt = null; pendingFileText = null; lastMasterPw = null;
   restoringBackup = false;
+  stopTotpTicker();
   setDirty(false);
   openGroups.clear();
   $("entryList").innerHTML = "";
@@ -1180,10 +1279,21 @@ async function selfTest() {
         /[a-z]/.test(pw) && /[A-Z]/.test(pw) && /[0-9]/.test(pw) && /[!@#$%^&*\-_=+?]/.test(pw));
       assert(`gen #${i} only allowed chars`, /^[a-zA-Z0-9!@#$%^&*\-_=+?]+$/.test(pw));
     }
+    // TOTP: official RFC 6238 SHA-1 test vectors (secret = ASCII "12345678901234567890")
+    const totpSecret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+    assert("base32 decode", dec.decode(base32Decode("GEZDGNBV")) === "12345");
+    assert("totp vector t=59", await totpCode(totpSecret, 59) === "287082");
+    assert("totp vector t=1111111109", await totpCode(totpSecret, 1111111109) === "081804");
+    assert("totp vector t=1234567890", await totpCode(totpSecret, 1234567890) === "005924");
+    assert("otpauth uri parsed",
+      normalizeTotpSecret("otpauth://totp/Acme:bob@example.com?secret=jbswy3dpehpk3pxp&issuer=Acme&algorithm=SHA1&digits=6&period=30") === "JBSWY3DPEHPK3PXP");
+    let badTotp = false;
+    try { normalizeTotpSecret("not!base32"); } catch { badTotp = true; }
+    assert("invalid totp secret rejected", badTotp);
     kdfSalt = crypto.getRandomValues(new Uint8Array(16));
     kdfIters = KDF_MIN_ITERS; // lowest accepted count keeps the test fast
     cryptoKey = await deriveKey("test-master-password", kdfSalt, kdfIters);
-    vault = { entries: [{ id: "1", name: "Gmail", user: "a@b.c", pass: "p", updated: "", history: [] }] };
+    vault = { entries: [{ id: "1", name: "Gmail", user: "a@b.c", pass: "p", totp: totpSecret, updated: "", history: [] }] };
     const fileText = await encryptVault();
     assert("ciphertext contains no plaintext", !fileText.includes("Gmail") && !fileText.includes("a@b.c"));
     const restored = await decryptVault(fileText, "test-master-password");
@@ -1494,16 +1604,19 @@ window.addEventListener("DOMContentLoaded", async () => {
     const pass = $("fPass").value;
     if (!name) return toast("Account name is required");
     if (!pass) return toast("Password is empty — generate or type one");
+    let totp;
+    try { totp = normalizeTotpSecret($("fTotp").value); }
+    catch (err) { return toast("2FA secret: " + err.message); }
     if (editingId) {
       const e = findEntry(editingId);
       if (e.pass !== pass) {
         e.history.unshift({ pass: e.pass, replaced: new Date().toISOString() });
         e.history = e.history.slice(0, HISTORY_KEEP);
       }
-      Object.assign(e, { name, label, user, pass, updated: new Date().toISOString() });
+      Object.assign(e, { name, label, user, pass, totp, updated: new Date().toISOString() });
     } else {
       vault.entries.push({
-        id: crypto.randomUUID(), name, label, user, pass,
+        id: crypto.randomUUID(), name, label, user, pass, totp,
         updated: new Date().toISOString(), history: []
       });
     }
