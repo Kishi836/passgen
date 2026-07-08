@@ -129,7 +129,7 @@
   }
   .tile {
     position: relative;
-    background: hsl(var(--h), 52%, 38%);
+    background: hsl(var(--h), 52%, var(--l, 38%));
     color: #fff7ec;
     border-style: solid; border-width: 4px;
     border-image: var(--pxborder) 3 / 4px / 0 stretch;
@@ -178,7 +178,7 @@
     flex-direction: row; align-items: center; justify-content: flex-start;
     gap: 14px; text-align: left;
     padding: 16px 18px;
-    background: hsl(var(--h), 52%, 32%);
+    background: hsl(var(--h), 52%, calc(var(--l, 38%) - 6%));
     border-bottom: 4px solid var(--border);
     cursor: pointer;
   }
@@ -225,6 +225,37 @@
     background: var(--panel2); color: var(--acc2);
     border: 3px solid var(--border);
   }
+
+  /* ---- Batch D: notes + vault health ---- */
+  details.notes { margin-top: 8px; }
+  details.notes summary { color: var(--muted); font-size: .68rem; cursor: pointer; }
+  details.notes summary:hover { color: var(--text); }
+  .notes-text { white-space: pre-wrap; word-break: break-word; font-size: .74rem;
+    background: #0e0b16; border: 3px dashed #5a5170; padding: 9px 12px; margin: 8px 0; }
+  #healthReport h4 { margin: 16px 0 6px; font-size: .8rem; font-weight: 400; color: var(--warn); }
+  .health-item { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 7px 0; font-size: .76rem; border-top: 3px solid #2a1e45; }
+  .health-item .entry-user { font-size: .68rem; }
+  .health-sep { height: 10px; }
+  .health-ok { color: var(--ok); font-size: .8rem; margin-top: 14px; }
+
+  /* ---- Batch E: accessibility & UI ---- */
+  /* character-class colors — Monocraft makes l/1/I and O/0 ambiguous */
+  .pc-d { color: var(--acc2); }   /* digits — cyan */
+  .pc-u { color: var(--warn); }   /* uppercase — yellow */
+  .pc-s { color: var(--acc1); }   /* symbols — magenta */
+  .tile:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--acc2), 5px 5px 0 0 var(--shadow); }
+  .toast.undo { pointer-events: auto; }
+  .toast.undo button { margin-left: 10px; }
+  /* list view: one row per account, tile look preserved */
+  #entryList.list { grid-template-columns: 1fr; gap: 12px; }
+  #entryList.list .tile { aspect-ratio: auto; }
+  #entryList.list .tile:not(.open) .tile-head {
+    height: auto; flex-direction: row; justify-content: flex-start;
+    text-align: left; padding: 12px 14px; gap: 12px;
+  }
+  #entryList.list .tile:not(.open) .avatar { width: 40px; height: 40px; flex: 0 0 40px; font-size: 1.1rem; }
+  #entryList.list .addtile { flex-direction: row; }
 
   .genbox > strong { font-size: .9rem; letter-spacing: .5px; font-weight: 400; }
   .genbox .genout { display: flex; gap: 10px; align-items: center; margin-top: 14px; flex-wrap: wrap; }
@@ -395,6 +426,8 @@
 
     <div class="toolbar" style="margin-bottom:12px">
       <input type="text" id="search" placeholder="🔍 Search accounts…" style="flex:1" autocapitalize="off" autocorrect="off" spellcheck="false">
+      <button id="btnView" title="Switch view">☰ List</button>
+      <button id="btnHealth" title="Audit passwords: reused / weak / old">🩺 Health</button>
       <button class="primary" id="btnAdd">＋ Add account</button>
     </div>
 
@@ -411,10 +444,14 @@
     <input type="text" id="fLabel" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="e.g. main, alt, work">
     <label for="fUser">Username / email</label>
     <input type="text" id="fUser" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+    <label for="fUrl">Website (optional — adds a 🌐 open button)</label>
+    <input type="text" id="fUrl" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="e.g. gmail.com">
     <label for="fPass">Password</label>
     <input type="text" id="fPass" class="mono" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
     <label for="fTotp">2FA / TOTP secret (optional — the QR code's secret or otpauth:// link)</label>
     <input type="text" id="fTotp" class="mono" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="e.g. JBSW Y3DP EHPK 3PXP">
+    <label for="fNotes">Notes (optional — recovery codes, PINs, security answers)</label>
+    <textarea id="fNotes" rows="3" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"></textarea>
     <div class="btn-row">
       <button class="small" id="btnFillGen">⚡ Generate 32-char</button>
     </div>
@@ -438,6 +475,24 @@
   </dialog>
 
   <!-- Face ID enrollment offer -->
+  <dialog id="confirmDialog">
+    <h3 id="confirmTitle"></h3>
+    <p class="sub" id="confirmMsg" style="white-space:pre-wrap"></p>
+    <div class="btn-row right">
+      <button id="btnConfirmNo">Cancel</button>
+      <button class="primary" id="btnConfirmYes">OK</button>
+    </div>
+  </dialog>
+
+  <dialog id="healthDialog">
+    <h3>🩺 Vault health</h3>
+    <p class="sub">Checks run locally — nothing leaves this device.</p>
+    <div id="healthReport"></div>
+    <div class="btn-row right">
+      <button id="btnHealthClose">Close</button>
+    </div>
+  </dialog>
+
   <dialog id="backupDialog">
     <h3>⏪ Local backups</h3>
     <p class="sub">Encrypted snapshots kept in this browser (last 5) — taken whenever a
@@ -481,7 +536,7 @@ const AUTOSAVE_DELAY = 1200;            // debounce before an auto-save fires
 const MASK = "••••••••••••";
 const PENDING_KEY = "passgen.pendingVault"; // sessionStorage: encrypted stash from a dirty auto-lock
 
-let vault       = null;   // decrypted: { entries: [{id,name,label,user,pass,updated,history[]}] }
+let vault       = null;   // decrypted: { entries: [{id,name,label,user,pass,url,notes,totp,updated,history[]}] }
 let cryptoKey   = null;   // derived AES key (non-extractable)
 let kdfSalt     = null;   // Uint8Array(16)
 let kdfIters    = KDF_ITERATIONS; // iterations the current key was derived with
@@ -495,6 +550,7 @@ let lastMasterPw = null;  // transient: held only between unlock and a possible 
 let autoSave    = localStorage.getItem("passgen.autosave") !== "0"; // default ON
 let autoSaveTimer = null;
 let lastSyncedText = null; // vault.json ciphertext as last read from / written to disk
+let viewMode    = localStorage.getItem("passgen.view") || "tiles"; // tile grid vs list rows
 let restoringBackup = false; // next unlock comes from a local backup snapshot
 let conflictHinted = false;  // auto-save conflict toast shown (don't spam)
 
@@ -806,6 +862,80 @@ async function tickTotp() {
   }
 }
 
+/* ==================== website URL (batch D) ==================== */
+
+/* Accepts a bare domain ("gmail.com") or a full address; returns the canonical
+   http(s) URL, "" for empty input, or throws with a reason. Anything that isn't
+   already http(s):// gets "https://" prepended — which also mangles dangerous
+   schemes (javascript:, data:) into unparseable hosts, so only real websites
+   survive. */
+function normalizeUrl(input) {
+  let s = (input || "").trim();
+  if (!s) return "";
+  if (!/^https?:\/\//i.test(s)) s = "https://" + s;
+  let u;
+  try { u = new URL(s); } catch { throw new Error("That doesn't look like a valid web address."); }
+  if (u.protocol !== "http:" && u.protocol !== "https:")
+    throw new Error("Only http(s) sites can be opened.");
+  return u.href;
+}
+
+/* ==================== vault health audit (batch D) ==================== */
+
+const STALE_DAYS = 365;  // password older than this → "old"
+const WEAK_BITS  = 72;   // estimated entropy below this → "weak"
+
+/* Rough strength estimate: length × log2 of the character pool actually used
+   (26 lower + 26 upper + 10 digits + 33 symbols). Ignores dictionary words —
+   it's a smoke alarm, not a cracker. */
+function passwordBits(pw) {
+  let pool = 0;
+  if (/[a-z]/.test(pw)) pool += 26;
+  if (/[A-Z]/.test(pw)) pool += 26;
+  if (/[0-9]/.test(pw)) pool += 10;
+  if (/[^a-zA-Z0-9]/.test(pw)) pool += 33;
+  return pw.length * Math.log2(pool || 1);
+}
+
+/* Pure + testable. Returns { reused: [[entry,…],…], weak: [{entry,bits},…],
+   stale: [{entry,days},…] }. Entries with unparseable `updated` are never stale. */
+function auditVault(entries, nowMs) {
+  const byPass = new Map();
+  for (const e of entries) {
+    if (!e.pass) continue;
+    if (!byPass.has(e.pass)) byPass.set(e.pass, []);
+    byPass.get(e.pass).push(e);
+  }
+  const reused = [...byPass.values()].filter(g => g.length >= 2);
+  const weak = entries
+    .filter(e => e.pass && passwordBits(e.pass) < WEAK_BITS)
+    .map(e => ({ entry: e, bits: Math.round(passwordBits(e.pass)) }));
+  const stale = entries
+    .map(e => ({ entry: e, days: Math.floor((nowMs - Date.parse(e.updated)) / 86400000) }))
+    .filter(x => Number.isFinite(x.days) && x.days >= STALE_DAYS);
+  return { reused, weak, stale };
+}
+
+function renderHealthReport() {
+  const { reused, weak, stale } = auditVault(vault.entries, Date.now());
+  const who = e => `${escapeHtml(e.name)}${e.label ? ` · ${escapeHtml(e.label)}` : ""}` +
+    (e.user ? ` <span class="entry-user">${escapeHtml(e.user)}</span>` : "");
+  const item = (e, note) => `<div class="health-item"><span>${who(e)}${note ? ` — ${note}` : ""}</span>` +
+    `<button class="small" data-jump="${escapeHtml(e.name)}">show</button></div>`;
+  let html = "";
+  if (reused.length)
+    html += `<h4>♻ Reused passwords (${reused.length} group${reused.length > 1 ? "s" : ""})</h4>` +
+      reused.map(g => g.map(e => item(e, "")).join("")).join(`<div class="health-sep"></div>`);
+  if (weak.length)
+    html += `<h4>🫤 Weak passwords (${weak.length})</h4>` +
+      weak.map(w => item(w.entry, `~${w.bits} bits`)).join("");
+  if (stale.length)
+    html += `<h4>🕰 Old passwords (${stale.length})</h4>` +
+      stale.map(s => item(s.entry, `${s.days} days old`)).join("");
+  $("healthReport").innerHTML = html ||
+    `<p class="health-ok">✅ All good — no reused, weak, or year-old passwords.</p>`;
+}
+
 /* ==================== file I/O ==================== */
 
 const hasFSAccess = "showOpenFilePicker" in window;
@@ -897,16 +1027,17 @@ async function guardConflict(interactive) {
   let theirs = null;
   try { theirs = await decryptWithCurrentKey(diskText); } catch {}
   if (!theirs) {
-    return confirm(
-      "⚠ vault.json was re-encrypted elsewhere (master password changed on another device?).\n\n" +
-      "OK = OVERWRITE it with this device's copy\n" +
-      "Cancel = don't save (re-open the file to see the other version — the current disk copy was just backed up)");
+    return ask(
+      "vault.json was re-encrypted elsewhere (master password changed on another device?).\n\n" +
+      "Overwrite it with this device's copy?\n" +
+      "(Cancel = don't save; re-open the file to see the other version — the current disk copy was just backed up)",
+      { title: "⚠ Vault conflict", ok: "Overwrite", danger: true });
   }
   const { merged, took } = mergeVaults(vault, theirs);
-  if (!confirm(
-      "⚠ vault.json changed on another device since you opened it.\n\n" +
-      `OK = merge and save (keeps ${took} change(s) from the other device plus everything from this one)\n` +
-      "Cancel = don't save")) return false;
+  if (!await ask(
+      "vault.json changed on another device since you opened it.\n\n" +
+      `Merge and save? (keeps ${took} change(s) from the other device plus everything from this one)`,
+      { title: "⚠ Vault conflict", ok: "Merge & save" })) return false;
   vault = merged;
   lastSyncedText = diskText;
   renderEntries();
@@ -953,10 +1084,21 @@ async function saveVaultFile(interactive = true) {
 let toastTimer = null;
 function toast(msg) {
   const t = $("toast");
+  t.classList.remove("undo");
   t.textContent = msg;
   t.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+/* Toast with an ↩ Undo button (batch E) — used by delete. */
+function toastUndo(msg, onUndo) {
+  const t = $("toast");
+  t.innerHTML = `${escapeHtml(msg)}<button class="small" id="btnUndo">↩ Undo</button>`;
+  t.classList.add("show", "undo");
+  clearTimeout(toastTimer);
+  $("btnUndo").onclick = () => { t.classList.remove("show", "undo"); onUndo(); };
+  toastTimer = setTimeout(() => t.classList.remove("show", "undo"), 8000);
 }
 
 let clipClearTimer = null;
@@ -987,6 +1129,15 @@ function setDirty(v) {
 }
 
 /* ==================== auto-save ==================== */
+
+/* ---- tile grid ⇄ list view (batch E) ---- */
+function reflectView() {
+  $("entryList").classList.toggle("list", viewMode === "list");
+  const btn = $("btnView");
+  if (!btn) return;
+  btn.textContent = viewMode === "list" ? "▦ Tiles" : "☰ List";
+  btn.title = viewMode === "list" ? "Switch to the tile grid" : "Switch to a compact list";
+}
 
 function reflectAutoToggle() {
   const btn = $("btnAutoToggle");
@@ -1021,6 +1172,63 @@ async function doAutoSave() {
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g, c =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+/* ==================== styled confirm (batch E) ==================== */
+
+/* Drop-in async replacement for confirm(): styled <dialog>, Esc = cancel.
+   Promise resolves once; the close-event resolve(false) is a no-op after OK. */
+function ask(msg, opts = {}) {
+  return new Promise(resolve => {
+    $("confirmTitle").textContent = opts.title || "Are you sure?";
+    $("confirmMsg").textContent = msg;
+    const dlg = $("confirmDialog"), yes = $("btnConfirmYes"), no = $("btnConfirmNo");
+    yes.textContent = opts.ok || "OK";
+    no.textContent = opts.cancel || "Cancel";
+    yes.className = opts.danger ? "danger" : "primary";
+    dlg.onclose = () => resolve(false);
+    yes.onclick = () => { resolve(true); dlg.close(); };
+    no.onclick = () => dlg.close();
+    dlg.showModal();
+  });
+}
+
+/* ==================== character-class colors (batch E) ==================== */
+
+/* Monocraft makes l/1/I and O/0 ambiguous — color digits (cyan), uppercase
+   (yellow) and symbols (magenta) so revealed passwords can be read aloud
+   unambiguously. Returns escaped HTML. */
+function colorizePassword(pw) {
+  return [...pw].map(c => {
+    const cls = /[0-9]/.test(c) ? "pc-d" : /[A-Z]/.test(c) ? "pc-u" : /[a-z]/.test(c) ? "" : "pc-s";
+    const ch = escapeHtml(c);
+    return cls ? `<span class="${cls}">${ch}</span>` : ch;
+  }).join("");
+}
+
+/* ==================== tile contrast (batch E) ==================== */
+
+/* Tiles used a fixed hsl(H 52% 38%) background — too bright for the near-white
+   text on yellow/green/cyan hues. Pick, per hue, the highest lightness ≤38%
+   that keeps WCAG AA (≥4.5:1) contrast with #fff7ec. */
+function hslToRgb(h, s, l) {
+  s /= 100; l /= 100;
+  const k = n => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return [f(0), f(8), f(4)];
+}
+function relLuma([r, g, b]) {
+  const lin = c => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+}
+const TILE_TEXT_LUMA = relLuma([255 / 255, 247 / 255, 236 / 255]); // #fff7ec
+function tileContrast(h, s, l) {
+  return (TILE_TEXT_LUMA + 0.05) / (relLuma(hslToRgb(h, s, l)) + 0.05);
+}
+function tileLightness(h) {
+  for (let l = 38; l >= 16; l -= 2) if (tileContrast(h, 52, l) >= 4.5) return l;
+  return 16;
 }
 
 /* ==================== rendering ==================== */
@@ -1065,6 +1273,7 @@ function renderEntries() {
           <div class="entry-user">${escapeHtml(e.user) || "—"}</div>
         </div>
         <div class="entry-actions">
+          ${e.url ? `<button class="small" data-act="open" title="Open ${escapeHtml(e.url)}">🌐</button>` : ""}
           <button class="small" data-act="edit" title="Edit">✏️</button>
           <button class="small danger" data-act="del" title="Delete">🗑</button>
         </div>
@@ -1085,16 +1294,23 @@ function renderEntries() {
           <button class="small" data-act="copytotp" title="Copy 2FA code">📋 2FA</button>
         </div>
       </div>` : ""}
+      ${e.notes ? `
+      <details class="notes">
+        <summary>notes</summary>
+        <div class="notes-text mono">${escapeHtml(e.notes)}</div>
+        <button class="small" data-act="copynotes" title="Copy notes">📋 Copy notes</button>
+      </details>` : ""}
       <div class="entry-meta">updated ${new Date(e.updated).toLocaleString()}</div>
       ${e.history.length ? `
         <details class="history">
           <summary>previous passwords (${e.history.length})</summary>
-          ${e.history.map(h => `<div class="mono">${escapeHtml(h.pass)} <em>(until ${new Date(h.replaced).toLocaleString()})</em></div>`).join("")}
+          ${e.history.map(h => `<div class="mono">${colorizePassword(h.pass)} <em>(until ${new Date(h.replaced).toLocaleString()})</em></div>`).join("")}
         </details>` : ""}
     </div>`;
 
   const tile = g => `
-    <div class="tile${openGroups.has(g.name) ? " open" : ""}" style="--h:${hueOf(g.name)}" data-group="${escapeHtml(g.name)}">
+    <div class="tile${openGroups.has(g.name) ? " open" : ""}" style="--h:${hueOf(g.name)};--l:${tileLightness(hueOf(g.name))}%" data-group="${escapeHtml(g.name)}"
+         tabindex="0" role="button" aria-expanded="${openGroups.has(g.name)}">
       <div class="tile-head">
         <div class="avatar">${escapeHtml([...g.name][0].toUpperCase())}</div>
         <div class="tile-meta">
@@ -1107,7 +1323,7 @@ function renderEntries() {
       <div class="tile-body"><div class="acct-list">${g.members.map(row).join("")}</div></div>
     </div>`;
 
-  const addTile = `<div class="tile addtile" data-addtile><div class="plus">＋</div><div class="tname">Add account</div></div>`;
+  const addTile = `<div class="tile addtile" data-addtile tabindex="0" role="button" aria-label="Add account"><div class="plus">＋</div><div class="tname">Add account</div></div>`;
   const msg = matches.length === 0
     ? `<div class="empty">${vault.entries.length === 0 ? "No accounts yet — add your first one below" : "No matches"}</div>`
     : "";
@@ -1124,19 +1340,20 @@ function openAddDialog(prefillName) {
   editingId = null;
   $("entryDialogTitle").textContent = prefillName ? `Add login to ${prefillName}` : "Add account";
   $("fName").value = prefillName || "";
-  $("fLabel").value = $("fUser").value = $("fPass").value = $("fTotp").value = "";
+  $("fLabel").value = $("fUser").value = $("fUrl").value = $("fPass").value = $("fTotp").value = $("fNotes").value = "";
   $("entryDialog").showModal();
   (prefillName ? $("fLabel") : $("fName")).focus();
 }
 
-function entryAction(id, act, rowEl) {
+async function entryAction(id, act, rowEl) {
   const e = findEntry(id);
   if (!e) return;
   switch (act) {
     case "show": {
       const pwEl = rowEl.querySelector('[data-role="pw"]');
       const hiddenNow = pwEl.textContent.startsWith("•");
-      pwEl.textContent = hiddenNow ? e.pass : MASK;
+      if (hiddenNow) pwEl.innerHTML = colorizePassword(e.pass);
+      else pwEl.textContent = MASK;
       clearTimeout(pwEl._hideTimer);
       if (hiddenNow) pwEl._hideTimer = setTimeout(() => { pwEl.textContent = MASK; }, REVEAL_HIDE_MS);
       break;
@@ -1148,8 +1365,15 @@ function entryAction(id, act, rowEl) {
       totpCode(e.totp, Math.floor(Date.now() / 1000))
         .then(c => copyText(c, `${e.name} 2FA code`), () => toast("Invalid TOTP secret on this entry"));
       break;
+    case "open":
+      window.open(e.url, "_blank", "noopener,noreferrer");
+      break;
+    case "copynotes":
+      copyText(e.notes, `${e.name} notes`);
+      break;
     case "regen": {
-      if (!confirm(`Generate a NEW password for "${e.name}"?\n\nThe current one is kept under "previous passwords" until you save & confirm the change on the website.`)) return;
+      if (!await ask(`Generate a NEW password for "${e.name}"?\n\nThe current one is kept under "previous passwords" until you save & confirm the change on the website.`,
+                     { title: "🔄 New password", ok: "Generate" })) return;
       e.history.unshift({ pass: e.pass, replaced: new Date().toISOString() });
       e.history = e.history.slice(0, HISTORY_KEEP);
       e.pass = generatePassword(32, $("genSymbols").value);
@@ -1165,16 +1389,26 @@ function entryAction(id, act, rowEl) {
       $("fName").value = e.name;
       $("fLabel").value = e.label || "";
       $("fUser").value = e.user;
+      $("fUrl").value = e.url || "";
       $("fPass").value = e.pass;
       $("fTotp").value = e.totp || "";
+      $("fNotes").value = e.notes || "";
       $("entryDialog").showModal();
       break;
-    case "del":
-      if (!confirm(`Delete "${e.name}" and its password history? This cannot be undone after saving.`)) return;
-      vault.entries = vault.entries.filter(x => x.id !== id);
+    case "del": {
+      const idx = vault.entries.findIndex(x => x.id === id);
+      if (idx === -1) return;
+      vault.entries.splice(idx, 1);
       setDirty(true);
       renderEntries();
+      toastUndo(`Deleted "${e.name}" (incl. history)`, () => {
+        vault.entries.splice(Math.min(idx, vault.entries.length), 0, e);
+        setDirty(true);
+        renderEntries();
+        toast(`Restored "${e.name}"`);
+      });
       break;
+    }
   }
 }
 
@@ -1195,13 +1429,15 @@ function showApp() {
   $("app").classList.remove("hidden");
   reflectFaceToggle();
   reflectAutoToggle();
+  reflectView();
   startTotpTicker();
   renderEntries();
   resetLockTimer();
 }
 
-function lock() {
-  if (dirty && !confirm("You have UNSAVED changes that will be lost. Lock anyway?")) return;
+async function lock() {
+  if (dirty && !await ask("You have UNSAVED changes that will be lost. Lock anyway?",
+                          { title: "🔒 Lock", ok: "Lock anyway", danger: true })) return;
   vault = null; cryptoKey = null; kdfSalt = null; pendingFileText = null; lastMasterPw = null;
   restoringBackup = false;
   stopTotpTicker();
@@ -1342,6 +1578,33 @@ async function selfTest() {
     assert("grouping merges same name", grouped.length === 2);
     assert("grouping keeps both logins",
       (grouped.find(g => g.name === "Discord") || { members: [] }).members.length === 2);
+    // batch D: URL normalization + vault health audit
+    assert("url: bare domain gets https", normalizeUrl("example.com") === "https://example.com/");
+    assert("url: explicit http kept", normalizeUrl("http://example.com/x") === "http://example.com/x");
+    assert("url: empty stays empty", normalizeUrl("  ") === "");
+    let badUrl = false;
+    try { normalizeUrl("javascript:alert(1)"); } catch { badUrl = true; }
+    assert("url: javascript: rejected", badUrl);
+    const auditNow = Date.parse("2026-07-08T00:00:00Z");
+    const audit = auditVault([
+      { id: "1", name: "A", user: "", pass: "same-pass-here", updated: "2026-07-01T00:00:00Z", history: [] },
+      { id: "2", name: "B", user: "", pass: "same-pass-here", updated: "2026-07-01T00:00:00Z", history: [] },
+      { id: "3", name: "C", user: "", pass: "abc123", updated: "2024-01-01T00:00:00Z", history: [] },
+      { id: "4", name: "D", user: "", pass: "X9$mQ2#vL8@wZ5!kR3^tN7&bJ4*fH6qP", updated: "2026-07-07T00:00:00Z", history: [] },
+    ], auditNow);
+    assert("audit: reused pair found", audit.reused.length === 1 && audit.reused[0].length === 2);
+    assert("audit: weak password flagged", audit.weak.length === 1 && audit.weak[0].entry.id === "3");
+    assert("audit: strong password not weak", !audit.weak.some(w => w.entry.id === "4"));
+    assert("audit: stale entry flagged", audit.stale.length === 1 && audit.stale[0].entry.id === "3");
+    assert("audit: fresh entry not stale", !audit.stale.some(s => s.entry.id === "4"));
+    // batch E: character-class coloring + WCAG tile contrast
+    assert("colorize: classes tagged", colorizePassword("aB1!") ===
+      `a<span class="pc-u">B</span><span class="pc-d">1</span><span class="pc-s">!</span>`);
+    assert("colorize: html escaped", colorizePassword("<") === `<span class="pc-s">&lt;</span>`);
+    assert("tile contrast ≥ 4.5:1 on every hue",
+      [...Array(360).keys()].every(h => tileContrast(h, 52, tileLightness(h)) >= 4.5));
+    assert("tile lightness never brighter than design base",
+      [...Array(360).keys()].every(h => tileLightness(h) <= 38));
   } catch (err) {
     results.push("ERROR: " + err.name + " " + err.message);
   }
@@ -1532,7 +1795,8 @@ window.addEventListener("DOMContentLoaded", async () => {
   /* ---- Face ID toggle in the toolbar ---- */
   $("btnFaceToggle").onclick = async () => {
     if (faceConfigured()) {
-      if (!confirm("Turn off Face ID unlock on this iPad? You'll type the master password next time.")) return;
+      if (!await ask("Turn off Face ID unlock on this iPad? You'll type the master password next time.",
+                     { title: "🙂 Face ID", ok: "Turn off", danger: true })) return;
       clearFace();
       reflectFaceToggle();
       toast("Face ID unlock turned off");
@@ -1580,7 +1844,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   /* ---- generator ---- */
   $("btnGen").onclick = () => {
     const len = Math.min(128, Math.max(8, parseInt($("genLen").value, 10) || 32));
-    $("genResult").textContent = generatePassword(len, $("genSymbols").value);
+    $("genResult").innerHTML = colorizePassword(generatePassword(len, $("genSymbols").value));
     $("genOut").classList.remove("hidden");
     try{ const _o=document.getElementById('genOut'); if(_o){ _o.classList.remove('pulse'); void _o.offsetWidth; _o.classList.add('pulse'); } }catch(e){}
   };
@@ -1589,11 +1853,36 @@ window.addEventListener("DOMContentLoaded", async () => {
   /* ---- search ---- */
   $("search").addEventListener("input", renderEntries);
 
+  /* ---- tile ⇄ list view toggle ---- */
+  reflectView();
+  $("btnView").onclick = () => {
+    viewMode = viewMode === "list" ? "tiles" : "list";
+    localStorage.setItem("passgen.view", viewMode);
+    reflectView();
+  };
+
+  /* ---- vault health audit ---- */
+  $("btnHealth").onclick = () => {
+    if (!vault) return;
+    renderHealthReport();
+    $("healthDialog").showModal();
+  };
+  $("btnHealthClose").onclick = () => $("healthDialog").close();
+  $("healthReport").addEventListener("click", ev => {
+    const btn = ev.target.closest("button[data-jump]");
+    if (!btn) return;
+    $("healthDialog").close();
+    $("search").value = btn.dataset.jump;
+    openGroups.add(btn.dataset.jump);
+    renderEntries();
+  });
+
   /* ---- add / edit entry dialog ---- */
   $("btnAdd").onclick = () => openAddDialog();
-  $("btnFillGen").onclick = () => {
+  $("btnFillGen").onclick = async () => {
     if ($("fPass").value &&
-        !confirm("Replace the password in this field with a newly generated one?")) return;
+        !await ask("Replace the password in this field with a newly generated one?",
+                   { title: "⚡ Generate", ok: "Replace" })) return;
     $("fPass").value = generatePassword(32, $("genSymbols").value);
   };
   $("btnEntryCancel").onclick = () => $("entryDialog").close();
@@ -1607,16 +1896,20 @@ window.addEventListener("DOMContentLoaded", async () => {
     let totp;
     try { totp = normalizeTotpSecret($("fTotp").value); }
     catch (err) { return toast("2FA secret: " + err.message); }
+    let url;
+    try { url = normalizeUrl($("fUrl").value); }
+    catch (err) { return toast("Website: " + err.message); }
+    const notes = $("fNotes").value.trim();
     if (editingId) {
       const e = findEntry(editingId);
       if (e.pass !== pass) {
         e.history.unshift({ pass: e.pass, replaced: new Date().toISOString() });
         e.history = e.history.slice(0, HISTORY_KEEP);
       }
-      Object.assign(e, { name, label, user, pass, totp, updated: new Date().toISOString() });
+      Object.assign(e, { name, label, user, url, pass, totp, notes, updated: new Date().toISOString() });
     } else {
       vault.entries.push({
-        id: crypto.randomUUID(), name, label, user, pass, totp,
+        id: crypto.randomUUID(), name, label, user, url, pass, totp, notes,
         updated: new Date().toISOString(), history: []
       });
     }
@@ -1668,6 +1961,19 @@ window.addEventListener("DOMContentLoaded", async () => {
       const name = t.dataset.group;
       if (t.classList.toggle("open")) openGroups.add(name); else openGroups.delete(name);
     }
+  });
+
+  /* keyboard: tiles are focusable — Enter/Space toggles or adds (batch E) */
+  $("entryList").addEventListener("keydown", ev => {
+    if (ev.key !== "Enter" && ev.key !== " ") return;
+    if (ev.target.closest("button, input, textarea, details, a")) return;
+    const t = ev.target.closest(".tile");
+    if (!t) return;
+    ev.preventDefault();
+    if (t.hasAttribute("data-addtile")) { openAddDialog(); return; }
+    const name = t.dataset.group;
+    if (t.classList.toggle("open")) openGroups.add(name); else openGroups.delete(name);
+    t.setAttribute("aria-expanded", t.classList.contains("open"));
   });
 
   /* ---- warn before leaving with unsaved changes ---- */
